@@ -35,7 +35,8 @@ def predict(model, tokenizer, example):
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+    # El template ya incluye <|begin_of_text|>; sin esto el tokenizer agrega un segundo BOS.
+    inputs = tokenizer([prompt], return_tensors="pt", add_special_tokens=False).to("cuda")
     out = model.generate(
         **inputs,
         max_new_tokens=160,
