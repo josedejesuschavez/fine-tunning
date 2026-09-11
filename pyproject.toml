@@ -1,0 +1,27 @@
+[project]
+name = "fine-tunning"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jose de Jesus Chavez", email = "chavezjal06@hotmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.14.0",
+    "unsloth>=2025.5.1",
+]
+
+[project.scripts]
+fine-tunning = "fine_tunning:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
