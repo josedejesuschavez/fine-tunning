@@ -49,13 +49,20 @@ def predict(model, tokenizer, example):
 
 
 def parse_json(text):
-    match = re.search(r"\{.*?\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    """Primer objeto JSON del texto que tenga alguno de los campos esperados.
+
+    raw_decode soporta objetos anidados (p. ej. origin como {"City": ..., "ST": ...}),
+    que una regex no greedy cortaba en la primera llave de cierre.
+    """
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and any(f in obj for f in FIELDS):
+            return obj
+    return None
 
 
 def is_strict_json(text):

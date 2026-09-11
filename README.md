@@ -178,33 +178,34 @@ La primera ejecución descarga el modelo base desde Hugging Face (unos 2 GB).
 
 ## Resultados
 
-Extracción exacta del **adaptador v1** frente al modelo base, sobre 175 ejemplos de test:
+Extracción exacta (los 6 campos correctos) sobre 175 ejemplos de test. **v2** es el dataset actual; **v1** es la versión anterior, medida con su propio test:
 
-| Grupo | LoRA v1 | Modelo base |
-|---|---|---|
-| `in_dist` | **100%** | 78% |
-| `nuevos_valores` | **100%** | 84% |
-| `nueva_plantilla` | 100% | 100% |
-| `distractores` | 0% | 0% |
-| `correcciones` | **64%** | 56% |
-| `espanol` | 100% | 100% |
-| **Total** | **81%** | 71% |
-| **JSON estricto** | **99%** | 0% |
+| Grupo | LoRA v2 | Base v2 | LoRA v1 | Base v1 |
+|---|---|---|---|---|
+| `in_dist` | **100%** | 4% | 100% | 78% |
+| `nuevos_valores` | **100%** | 0% | 100% | 84% |
+| `nueva_plantilla` | **100%** | 0% | 100% | 100% |
+| `distractores` | **100%** | 0% | 0% | 0% |
+| `correcciones` | 60% | 0% | 64% | 56% |
+| `espanol` | **100%** | 0% | 100% | 100% |
+| **Total** | **94%** | 1% | 81% | 71% |
+| **JSON estricto** | **100%** | 0% | 99% | 0% |
 
-> Medido con la versión anterior del dataset: números de carga con prefijo `#` e instrucción sin el formato `City, ST`. Los cambios de la versión actual responden directamente a estos hallazgos.
+> v1: números de carga con prefijo `#` e instrucción sin el formato `City, ST`. v2: instrucción con `origin (City, ST)` y ejemplos con direcciones completas en el entrenamiento. Como la instrucción cambió, las columnas del modelo base no son comparables entre versiones (ver hallazgos).
 
 **Hallazgos principales**
 
-- **Formato:** el modelo base siempre envuelve el JSON en texto y bloques de código (0% estricto). El adaptador responde solo con el JSON, así que su salida se puede consumir directamente con `json.loads`.
-- **Precisión en números:** el modelo base copia mal algunas tarifas (por ejemplo, `875.45` → `87.545`). El adaptador las copia bien, incluso con varios montos distractores en el documento.
-- **Convenciones del dominio:** el adaptador aprende reglas implícitas de los datos que el modelo base no puede adivinar.
-- **Direcciones completas:** los dos modelos copiaban la dirección entera en lugar de `City, ST`. Por eso la versión actual especifica el formato en la instrucción e incluye ejemplos con direcciones en el entrenamiento.
+- **Formato:** el modelo base siempre envuelve el JSON en texto y bloques de código (0% estricto). El adaptador responde solo con el JSON (100% estricto), así que su salida se puede consumir directamente con `json.loads`.
+- **`City, ST`:** en v1 los dos modelos copiaban la dirección completa en origen y destino (`distractores` en 0%). Especificar el formato en la instrucción y entrenar con direcciones completas llevó al adaptador a 100% en ese grupo.
+- **El modelo base interpreta mal `(City, ST)`:** lo toma como un objeto anidado (`"origin": {"City": "Midland", "ST": "TX"}`), y por eso su extracción exacta cae a 1%. Los valores sí los encuentra: broker 99%, número de carga 100%, fecha 98% y tarifa 97%. La caída es de formato, no de comprensión; el adaptador aprende el formato de los ejemplos.
+- **Correcciones, el punto débil del adaptador:** cuando el documento corrige la fecha o la tarifa, el adaptador a veces toma el valor original (fecha correcta en 64% y tarifa en 84% de ese grupo). En esos mismos casos, el modelo base acierta la fecha en 96% y la tarifa en 100%, así que el adaptador no está aprendiendo esa regla de los datos. El siguiente paso sería agregar más ejemplos de correcciones al entrenamiento.
 
 ---
 
 ## Notas técnicas
 
 - **Consistencia de tokenización entre entrenamiento e inferencia.** El *chat template* de Llama 3 ya incluye `<|begin_of_text|>`. Si se tokeniza con `add_special_tokens=True`, el prompt empieza con dos BOS, algo que el modelo nunca vio al entrenar. En este proyecto eso hacía que omitiera un campo completo en el 78% de los casos. `evaluate.py` tokeniza con `add_special_tokens=False` para que el formato coincida exactamente con el del entrenamiento.
+- **Lectura robusta del JSON.** Con la instrucción `origin (City, ST)`, el modelo base responde con objetos anidados (`"origin": {"City": "Midland", "ST": "TX"}`) y a veces envueltos en una lista. Una regex no greedy como `\{.*?\}` corta ese JSON en la primera llave de cierre y lo cuenta como inválido, lo que ponía en 0% incluso los campos que el modelo sí extraía bien. `parse_json` usa `json.JSONDecoder.raw_decode` para leer el primer objeto completo que tenga alguno de los campos esperados. Un `origin` anidado sigue contando como fallo, porque la instrucción pide el texto `City, ST`.
 - **Compatibilidad de versiones.** Las versiones recientes de Unsloth requieren `torch<2.13`. Con la restricción actual (`torch>=2.14.0`), el resolver usa Unsloth 2025.5.1, que funciona pero es una combinación antigua. Para actualizar Unsloth, hay que bajar el rango de `torch` y marcar el índice de PyTorch como `explicit = true` en `pyproject.toml`.
 
 ---
