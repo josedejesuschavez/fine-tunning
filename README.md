@@ -24,6 +24,7 @@ Agreed rate is $760.12 all in.
 - [Scripts](#scripts)
 - [Requisitos](#requisitos)
 - [Instalación y uso](#instalación-y-uso)
+- [Uso en una aplicación](#uso-en-una-aplicación)
 - [Resultados](#resultados)
 - [Notas técnicas](#notas-técnicas)
 
@@ -31,21 +32,24 @@ Agreed rate is $760.12 all in.
 
 ## Cómo está construido
 
-El proyecto es un pipeline de tres etapas: generar datos, entrenar un adaptador y evaluarlo contra el modelo base.
+El proyecto es un pipeline de tres etapas: generar datos, entrenar un adaptador y evaluarlo contra el modelo base. Una vez entrenado, `extract.py` usa el adaptador para extraer los datos de documentos nuevos.
 
 ```mermaid
 flowchart LR
     A[generate_data.py] -->|data/train.jsonl<br/>data/test.jsonl| B[train.py]
     B -->|outputs/lora| C[evaluate.py]
+    B -->|outputs/lora| E[extract.py]
     A -->|data/test.jsonl| C
     D[(Llama 3.2 3B<br/>Instruct 4-bit)] --> B
     D --> C
+    D --> E
 ```
 
 - **Datos sintéticos.** Los ejemplos se generan con plantillas que imitan formatos reales de rate confirmations. Cada ejemplo trae su respuesta correcta, así que no hace falta etiquetar a mano, y el test incluye grupos diseñados para medir generalización.
 - **QLoRA.** El modelo base se carga cuantizado a 4 bits y se mantiene **congelado**. Solo se entrenan matrices LoRA de bajo rango sobre las proyecciones de atención y del MLP. Así el entrenamiento cabe en una GPU de 8 GB, y el resultado es un adaptador de pocos MB en lugar de un modelo completo.
 - **Loss solo sobre la respuesta.** Con `train_on_responses_only`, el prompt se enmascara y todo el gradiente se usa en aprender a producir el JSON, no en reproducir el documento de entrada.
 - **Evaluación comparativa.** El mismo script evalúa el modelo base y el modelo con adaptador sobre el mismo test, con resultados por grupo y por campo.
+- **Inferencia con validación.** `extract.py` arma el prompt exactamente como en el entrenamiento y valida la respuesta: si no es un JSON limpio con los seis campos en el formato correcto, la rechaza en lugar de intentar repararla.
 
 ---
 
@@ -71,7 +75,11 @@ fine-tunning/
 ├── src/fine_tunning/
 │   ├── generate_data.py   # Genera el dataset sintético (train + test)
 │   ├── train.py           # Entrena el adaptador LoRA
-│   └── evaluate.py        # Mide la calidad de extracción (base vs. LoRA)
+│   ├── evaluate.py        # Mide la calidad de extracción (base vs. LoRA)
+│   └── extract.py         # Extrae los campos de un documento (CLI y clase Extractor)
+├── examples/
+│   ├── mi_app.py          # Ejemplo de integración: procesa una carpeta de documentos
+│   └── docs/              # Documentos de ejemplo
 ├── data/                  # train.jsonl y test.jsonl (generados, no versionados)
 ├── outputs/               # Adaptadores y resultados (generados, no versionados)
 │   └── lora/              # Adaptador entrenado + tokenizer
@@ -143,6 +151,33 @@ uv run python src/fine_tunning/evaluate.py outputs/lora   # base + adaptador LoR
 
 Imprime una tabla por grupo y, para cada grupo, el primer fallo con la entrada, la salida esperada y la respuesta del modelo.
 
+### `extract.py` — Extracción de documentos nuevos
+
+Carga el modelo base con el adaptador de `outputs/lora/` y devuelve el JSON de un documento. Se usa desde la línea de comandos o desde código (ver [Uso en una aplicación](#uso-en-una-aplicación)):
+
+```bash
+uv run python src/fine_tunning/extract.py documento.txt                            # desde un archivo
+cat documento.txt | uv run python src/fine_tunning/extract.py                      # desde stdin
+uv run python src/fine_tunning/extract.py documento.txt --adapter /ruta/al/adaptador  # otro adaptador
+```
+
+stdout contiene solo el JSON (los mensajes de Unsloth van a stderr), así que la salida se puede redirigir a un archivo o pasar a otro programa. Si algo falla, termina con código 1 y el motivo en stderr.
+
+- **Mismo prompt que en el entrenamiento.** La instrucción se importa de `generate_data.py` y el *chat template* se tokeniza con `add_special_tokens=False`, igual que en `evaluate.py`.
+- **Validación estricta.** La respuesta se lee con `json.loads`, sin intentar rescatar un JSON envuelto en texto, y debe cumplir estas reglas:
+
+| Campo | Regla |
+|---|---|
+| Todos | Exactamente los seis campos, ni más ni menos |
+| `broker`, `load_number` | Texto no vacío |
+| `origin`, `destination` | Formato `City, ST` |
+| `pickup_date` | Fecha válida en formato `YYYY-MM-DD` |
+| `rate` | Número positivo |
+
+- **Límite de tamaño.** El prompt (instrucción + documento) admite hasta 864 tokens, para dejar espacio a la respuesta dentro de los 1024 del modelo. Un documento más largo se rechaza en lugar de truncarse.
+
+Sobre los 175 ejemplos del test da los mismos resultados que `evaluate.py` (94% de extracción exacta), y la validación no rechaza ninguna respuesta.
+
 ---
 
 ## Requisitos
@@ -170,9 +205,50 @@ uv run python src/fine_tunning/train.py
 # 4. Evaluar el adaptador y el modelo base
 uv run python src/fine_tunning/evaluate.py outputs/lora
 uv run python src/fine_tunning/evaluate.py
+
+# 5. Extraer los datos de documentos nuevos
+uv run python src/fine_tunning/extract.py documento.txt
+uv run python examples/mi_app.py          # procesa los documentos de examples/docs
 ```
 
 La primera ejecución descarga el modelo base desde Hugging Face (unos 2 GB).
+
+---
+
+## Uso en una aplicación
+
+Desde Python, crea un `Extractor` una sola vez al arrancar (cargar el modelo es lo lento) y reúsalo para cada documento:
+
+```python
+from fine_tunning.extract import Extractor, ExtractionError
+
+extractor = Extractor("/ruta/a/fine-tunning/outputs/lora")
+
+try:
+    datos = extractor.extract(texto)   # dict con los seis campos
+except ExtractionError as e:
+    ...  # el modelo respondió algo inválido: revisión manual (e.raw tiene la respuesta)
+except ValueError as e:
+    ...  # documento vacío o demasiado largo
+```
+
+`examples/mi_app.py` es un ejemplo completo que procesa todos los `.txt` de una carpeta:
+
+```bash
+uv run python examples/mi_app.py                  # usa examples/docs
+uv run python examples/mi_app.py /ruta/a/carpeta
+```
+
+```text
+[OK]        1_rate_confirmation.txt: {"broker": "TQL", "load_number": "4471902", "origin": "Midland, TX", ...}
+[OK]        2_espanol.txt: {"broker": "Convoy", "load_number": "L2646960", "origin": "Tulsa, OK", ...}
+[RECHAZADO] 3_vacio.txt: el documento esta vacio
+```
+
+- **Entorno.** El código debe correr con el entorno de este proyecto (`uv run` desde el repo, o `.venv/bin/python`), donde `uv sync` instala el paquete `fine_tunning` junto con PyTorch y Unsloth.
+- **Concurrencia.** Si la aplicación atiende peticiones en paralelo (por ejemplo, una API web), usa un solo `Extractor` y protege `extract()` con un `threading.Lock`: el modelo en la GPU no está hecho para varias generaciones a la vez.
+- **Correcciones.** En documentos que corrigen la fecha o la tarifa, el adaptador acierta en 60% de los casos, y cuando falla devuelve un JSON válido con el valor original, así que la validación no lo detecta. Esos documentos necesitan revisión humana.
+- **Semilla global.** Importar `fine_tunning.extract` ejecuta `random.seed(42)`, porque `generate_data.py` fija la semilla al importarse. Si tu aplicación usa `random`, tenlo en cuenta.
 
 ---
 

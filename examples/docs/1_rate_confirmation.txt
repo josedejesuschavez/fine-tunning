@@ -1,0 +1,7 @@
+RATE CONFIRMATION
+Broker: TQL
+Load #: 4471902
+Pickup: 09/15/2026 - Permian Pipe Yard, 1200 Industrial Blvd, Midland, TX 79701
+Delivery: Houston, TX
+Equipment: Flatbed
+Total rate: $2,350.00
